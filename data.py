@@ -1,12 +1,13 @@
 import os
 import sys
 
+import cv2
 import numpy as np
 import tensorflow as tf
 
 import config
 import download
-
+from main import PATHS
 
 class SALICON:
     """This class represents the SALICON dataset. It consists of 10000 training
@@ -292,6 +293,35 @@ def postprocess_saliency_map(saliency_map, target_size):
 
     return saliency_map_jpeg
 
+def tf_postprocess_saliency_video(saliency_video, target_size, file_path):
+    [saliency_video] = \
+        tf.py_function(postprocess_saliency_video,
+                      [saliency_video, target_size, file_path],
+                      [tf.float32])
+    return saliency_video
+
+def postprocess_saliency_video(saliency_video, target_size, file_path):
+    commonpath = os.path.commonpath([PATHS["data"], PATHS["images"]])
+    file_path_str = file_path.numpy().decode("utf-8")
+    relative_file_path = os.path.relpath(file_path, start=commonpath)
+    output_file_path = os.path.join(PATHS["images"], relative_file_path)
+
+    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+
+    fourcc = cv.VideoWriter_fourcc(*'XVID')
+    out = cv.VideoWriter(output_file_path, fourcc, 25.0, target_size.numpy())
+
+    saliency_video *= 255
+    for frame in saliency_video.numpy():
+        saliency_map = _resize_image(frame, target_size, True)
+        saliency_map = _crop_image(saliency_map, target_size)
+
+        saliency_map = np.round(saliency_map)
+        saliency_map = np.cast(saliency_map, np.uint8)
+
+        out.write(saliency_map)
+    out.release()
+    return saliency_video
 
 def _fetch_dataset(files, target_size, shuffle, online=False):
     """Here the list of file directories is shuffled (only when training),
@@ -310,23 +340,56 @@ def _fetch_dataset(files, target_size, shuffle, online=False):
                 instances along with their shapes and file paths.
     """
 
+    print(files)
+
     dataset = tf.data.Dataset.from_tensor_slices(files)
 
     if shuffle:
         dataset = dataset.shuffle(len(files[0]))
 
-    dataset = dataset.map(lambda *files: _parse_function(files, target_size),
+    dataset = dataset.map(lambda *files: _tf_parse_video_files(files, target_size),
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-    batch_size = 1 if online else config.PARAMS["batch_size"]
-
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(5)
+    # batch_size = 1 if online else config.PARAMS["batch_size"]
+    # dataset = dataset.batch(batch_size)
+    # dataset = dataset.prefetch(5)
 
     return dataset
 
+def _tf_parse_video_files(files, target_size):
+  [image, original_size, files] = \
+        tf.py_function(_parse_video_files, [files, target_size], [tf.float32, tf.int32, tf.string])
+  image.set_shape([None, target_size[0], target_size[1], 3])
+  print(image, original_size, files)
+  return image, original_size, files
 
-def _parse_function(files, target_size):
+def _parse_video_files(files, target_size):
+    assert len(files) == 1
+
+    frames_list = []
+
+    path_tensor = files[0]
+    path = path_tensor.numpy().decode("utf-8")
+
+    cap = cv2.VideoCapture(path)
+    while cap.isOpened():
+      ret, frame = cap.read()
+      if ret:
+        original_size = frame.shape[:2]
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = _resize_image(image, target_size)
+        image = _pad_image(image, target_size)
+        frames_list.append(image)
+      else:
+        break
+    cap.release()
+
+    # Stack all frames along the 0th dimension, as if there was a batch of frames to feed to the
+    # network.
+    video = np.stack(frames_list)
+    return video, original_size, files
+
+def _parse_image_files(files, target_size):
     """This function reads image data dependent on the image type and
        whether it constitutes a stimulus or saliency map. All instances
        are then reshaped and padded to yield the target dimensionality.
@@ -505,7 +568,7 @@ def _get_file_list(data_path):
     else:
         for subdir, dirs, files in os.walk(data_path):
             for file in files:
-                if file.lower().endswith((".png", ".jpg", ".jpeg")):
+                if file.lower().endswith((".png", ".jpg", ".jpeg", ".avi")):
                     data_list.append(os.path.join(subdir, file))
 
     data_list.sort()

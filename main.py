@@ -13,8 +13,11 @@ import utils
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 tf.logging.set_verbosity(tf.logging.ERROR)
 
+PATHS = {}
 
 def define_paths(current_path, args):
+    global PATHS
+
     """A helper function to define all relevant path elements for the
        locations of data, weights, and the results from either training
        or testing a model.
@@ -46,7 +49,7 @@ def define_paths(current_path, args):
         if args.data not in data_path:
             data_path += args.data + "/"
 
-    paths = {
+    PATHS = {
         "data": data_path,
         "history": history_path,
         "images": images_path,
@@ -55,7 +58,7 @@ def define_paths(current_path, args):
         "weights": weights_path
     }
 
-    return paths
+    return PATHS
 
 
 def train_model(dataset, paths, device):
@@ -180,8 +183,9 @@ def test_model(dataset, paths, device):
                                            input_map={"input": input_images},
                                            return_elements=["output:0"])
 
-    jpeg = data.postprocess_saliency_map(predicted_maps[0],
-                                         original_shape[0])
+    print(original_shape)
+    print(predicted_maps)
+    avi = data.tf_postprocess_saliency_video(predicted_maps, original_shape, file_path)
 
     print(">> Start testing with %s %s model..." % (dataset.upper(), device))
 
@@ -190,20 +194,9 @@ def test_model(dataset, paths, device):
 
         while True:
             try:
-                output_file, path = sess.run([jpeg, file_path])
+                sess.run(avi)
             except tf.errors.OutOfRangeError:
                 break
-
-            path = path[0][0].decode("utf-8")
-
-            filename = os.path.basename(path)
-            filename = os.path.splitext(filename)[0]
-            filename += ".jpeg"
-
-            os.makedirs(paths["images"], exist_ok=True)
-
-            with open(paths["images"] + filename, "wb") as file:
-                file.write(output_file)
 
 
 def main():
