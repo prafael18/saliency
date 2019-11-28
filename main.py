@@ -1,6 +1,7 @@
 import argparse
 import os
 
+import cv2
 import numpy as np
 import tensorflow as tf
 
@@ -57,6 +58,8 @@ def define_paths(current_path, args):
         "latest": latest_path,
         "weights": weights_path
     }
+
+    print(PATHS)
 
     return PATHS
 
@@ -185,7 +188,6 @@ def test_model(dataset, paths, device):
 
     print(original_shape)
     print(predicted_maps)
-    avi = data.tf_postprocess_saliency_video(predicted_maps, original_shape, file_path)
 
     print(">> Start testing with %s %s model..." % (dataset.upper(), device))
 
@@ -194,7 +196,38 @@ def test_model(dataset, paths, device):
 
         while True:
             try:
-                sess.run(avi)
+                saliency_video, target_shape, np_file_path = \
+                    sess.run([predicted_maps, original_shape, file_path])
+
+                commonpath = os.path.commonpath(
+                    [paths["data"], paths["images"]])
+                file_path_str = np_file_path[0].decode("utf-8")
+                relative_file_path = os.path.relpath(
+                    file_path_str, start=commonpath)
+                output_file_path = os.path.join(
+                    paths["images"], relative_file_path)
+                os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                frame_size = (target_shape[1], target_shape[0])
+                frame_size = (saliency_video.shape[2], saliency_video.shape[1])
+                out = cv2.VideoWriter(
+                    output_file_path, fourcc, 25, frame_size, False)
+
+                saliency_video = np.squeeze(saliency_video)
+                saliency_video *= 255
+                for frame in saliency_video:
+                    saliency_map = data._resize_image(
+                        frame, target_shape, True, is_numpy=True)
+                    saliency_map = data._crop_image(
+                        saliency_map, target_shape, is_numpy=True)
+
+                    saliency_map = np.round(frame)
+                    saliency_map = saliency_map.astype(np.uint8)
+
+                    out.write(saliency_map)
+                out.release()
+
             except tf.errors.OutOfRangeError:
                 break
 

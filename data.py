@@ -7,7 +7,6 @@ import tensorflow as tf
 
 import config
 import download
-from main import PATHS
 
 class SALICON:
     """This class represents the SALICON dataset. It consists of 10000 training
@@ -293,36 +292,6 @@ def postprocess_saliency_map(saliency_map, target_size):
 
     return saliency_map_jpeg
 
-def tf_postprocess_saliency_video(saliency_video, target_size, file_path):
-    [saliency_video] = \
-        tf.py_function(postprocess_saliency_video,
-                      [saliency_video, target_size, file_path],
-                      [tf.float32])
-    return saliency_video
-
-def postprocess_saliency_video(saliency_video, target_size, file_path):
-    commonpath = os.path.commonpath([PATHS["data"], PATHS["images"]])
-    file_path_str = file_path.numpy().decode("utf-8")
-    relative_file_path = os.path.relpath(file_path, start=commonpath)
-    output_file_path = os.path.join(PATHS["images"], relative_file_path)
-
-    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
-
-    fourcc = cv.VideoWriter_fourcc(*'XVID')
-    out = cv.VideoWriter(output_file_path, fourcc, 25.0, target_size.numpy())
-
-    saliency_video *= 255
-    for frame in saliency_video.numpy():
-        saliency_map = _resize_image(frame, target_size, True)
-        saliency_map = _crop_image(saliency_map, target_size)
-
-        saliency_map = np.round(saliency_map)
-        saliency_map = np.cast(saliency_map, np.uint8)
-
-        out.write(saliency_map)
-    out.release()
-    return saliency_video
-
 def _fetch_dataset(files, target_size, shuffle, online=False):
     """Here the list of file directories is shuffled (only when training),
        loaded, batched, and prefetched to ensure high GPU utilization.
@@ -430,7 +399,7 @@ def _parse_image_files(files, target_size):
     return image_list
 
 
-def _resize_image(image, target_size, overfull=False):
+def _resize_image(image, target_size, overfull=False, is_numpy=False):
     """This resizing procedure preserves the original aspect ratio and might be
        followed by padding or cropping. Depending on whether the target size is
        smaller or larger than the current image size, the area or bicubic
@@ -453,38 +422,57 @@ def _resize_image(image, target_size, overfull=False):
                  [https://bit.ly/2XAavw0]
     """
 
-    current_size = tf.shape(image)[:2]
+    if is_numpy:
+        lb = np
+    else:
+        lb = tf
+
+    current_size = lb.shape(image)[:2]
 
     height_ratio = target_size[0] / current_size[0]
     width_ratio = target_size[1] / current_size[1]
 
     if overfull:
-        target_ratio = tf.maximum(height_ratio, width_ratio)
+        target_ratio = lb.maximum(height_ratio, width_ratio)
     else:
-        target_ratio = tf.minimum(height_ratio, width_ratio)
+        target_ratio = lb.minimum(height_ratio, width_ratio)
 
-    target_size = tf.cast(current_size, tf.float64) * target_ratio
-    target_size = tf.cast(tf.round(target_size), tf.int32)
+    if is_numpy:
+        target_size = np.array(current_size).astype(np.float64) * target_ratio
+        target_size = np.round(target_size).astype(np.int32)
+        target_size = (target_size[1], target_size[0])
 
-    shrinking = tf.cond(tf.logical_or(current_size[0] > target_size[0],
-                                      current_size[1] > target_size[1]),
-                        lambda: tf.constant(True),
-                        lambda: tf.constant(False))
+        image = np.expand_dims(image, 0)
 
-    image = tf.expand_dims(image, 0)
+        if current_size[0] > target_size[0] or current_size[1] > target_size[1]:
+           interpolation = cv2.INTER_AREA
+        else:
+           interpolation = cv2.INTER_CUBIC
+        image = cv2.resize(image, target_size, interpolation=interpolation)
+        image = np.clip(image, 0, 255)
+    else:
+        target_size = tf.cast(current_size, tf.float64) * target_ratio
+        target_size = tf.cast(tf.round(target_size), tf.int32)
 
-    image = tf.cond(shrinking,
-                    lambda: tf.image.resize_area(image, target_size,
-                                                 align_corners=True),
-                    lambda: tf.image.resize_bicubic(image, target_size,
-                                                    align_corners=True))
+        shrinking = tf.cond(tf.logical_or(current_size[0] > target_size[0],
+                                          current_size[1] > target_size[1]),
+                            lambda: tf.constant(True),
+                            lambda: tf.constant(False))
 
-    image = tf.clip_by_value(image[0], 0.0, 255.0)
+        image = tf.expand_dims(image, 0)
+
+        image = tf.cond(shrinking,
+                        lambda: tf.image.resize_area(image, target_size,
+                                                     align_corners=True),
+                        lambda: tf.image.resize_bicubic(image, target_size,
+                                                        align_corners=True))
+
+        image = tf.clip_by_value(image[0], 0.0, 255.0)
 
     return image
 
 
-def _pad_image(image, target_size):
+def _pad_image(image, target_size, is_numpy=False):
     """A single image, either stimulus or saliency map, will be padded
        symmetrically with the constant value 126 or 0 respectively.
 
@@ -496,28 +484,32 @@ def _pad_image(image, target_size):
     Returns:
         tensor, float32: 3D tensor that holds the values of the padded image.
     """
-
-    current_size = tf.shape(image)
-
-    pad_constant_value = tf.cond(tf.equal(current_size[2], 3),
-                                 lambda: tf.constant(126.0),
-                                 lambda: tf.constant(0.0))
+    if is_numpy:
+        lb = np
+        current_size = np.shape(image)
+        pad_constant_value = 126 if current_size[2] == 3 else 0
+    else:
+        lb = tf
+        current_size = tf.shape(image)
+        pad_constant_value = tf.cond(tf.equal(current_size[2], 3),
+                                     lambda: tf.constant(126.0),
+                                     lambda: tf.constant(0.0))
 
     pad_vertical = (target_size[0] - current_size[0]) / 2
     pad_horizontal = (target_size[1] - current_size[1]) / 2
 
-    pad_top = tf.floor(pad_vertical)
-    pad_bottom = tf.ceil(pad_vertical)
-    pad_left = tf.floor(pad_horizontal)
-    pad_right = tf.ceil(pad_horizontal)
+    pad_top = lb.floor(pad_vertical)
+    pad_bottom = lb.ceil(pad_vertical)
+    pad_left = lb.floor(pad_horizontal)
+    pad_right = lb.ceil(pad_horizontal)
 
     padding = [[pad_top, pad_bottom], [pad_left, pad_right], [0, 0]]
-    image = tf.pad(image, padding, constant_values=pad_constant_value)
+    image = lb.pad(image, padding, constant_values=pad_constant_value)
 
     return image
 
 
-def _crop_image(image, target_size):
+def _crop_image(image, target_size, is_numpy=False):
     """A single saliency map will be cropped according the specified target
        size by extracting the central region of the image and correctly
        removing the added padding.
@@ -532,13 +524,22 @@ def _crop_image(image, target_size):
                          with cropped dimensionality.
     """
 
-    current_size = tf.shape(image)[:2]
+    if is_numpy:
+        lb = np
+    else:
+        lb = tf
+
+    current_size = lb.shape(image)[:2]
 
     crop_vertical = (current_size[0] - target_size[0]) / 2
     crop_horizontal = (current_size[1] - target_size[1]) / 2
 
-    crop_top = tf.cast(tf.floor(crop_vertical), tf.int32)
-    crop_left = tf.cast(tf.floor(crop_horizontal), tf.int32)
+    if is_numpy:
+        crop_top = lb.floor(crop_vertical).astype(lb.int32)
+        crop_left = lb.floor(crop_horizontal).astype(lb.int32)
+    else:
+        crop_top = tf.cast(lb.floor(crop_vertical), lb.int32)
+        crop_left = tf.cast(lb.floor(crop_horizontal), lb.int32)
 
     border_bottom = crop_top + target_size[0]
     border_right = crop_left + target_size[1]
