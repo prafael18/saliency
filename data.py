@@ -207,20 +207,20 @@ class TEST:
                 specified under the path variable.
     """
 
-    def __init__(self, dataset, data_path):
+    def __init__(self, dataset, data_path, video_file):
         self._target_size = config.DIMS["image_size_%s" % dataset]
-
+        self.video_file = video_file
         self._dir_stimuli_test = data_path
 
     def load_data(self):
         test_list_x = _get_file_list(self._dir_stimuli_test)
 
         test_set = _fetch_dataset(test_list_x, self._target_size,
-                                  False, online=True)
+                                  False, self.video_file, online=True)
         return test_set
 
 
-def get_dataset_iterator(phase, dataset, data_path):
+def get_dataset_iterator(phase, dataset, data_path, video_file):
     """Entry point to make an initializable dataset iterator for either
        training or testing a model by calling the respective dataset class.
 
@@ -253,7 +253,7 @@ def get_dataset_iterator(phase, dataset, data_path):
         return next_element, train_init_op, valid_init_op
 
     if phase == "test":
-        test_class = TEST(dataset, data_path)
+        test_class = TEST(dataset, data_path, video_file)
         test_set = test_class.load_data()
 
         iterator = tf.data.Iterator.from_structure(test_set.output_types,
@@ -292,7 +292,7 @@ def postprocess_saliency_map(saliency_map, target_size):
 
     return saliency_map_jpeg
 
-def _fetch_dataset(files, target_size, shuffle, online=False):
+def _fetch_dataset(files, target_size, shuffle, video_file, online=False):
     """Here the list of file directories is shuffled (only when training),
        loaded, batched, and prefetched to ensure high GPU utilization.
 
@@ -308,17 +308,18 @@ def _fetch_dataset(files, target_size, shuffle, online=False):
         object: A dataset object that contains the batched and prefetched data
                 instances along with their shapes and file paths.
     """
-    dataset = tf.data.Dataset.from_tensor_slices(files)
+    # if shuffle:
+    #     dataset = dataset.shuffle(len(files[0]))
+    #
+    # dataset = dataset.map(lambda *files: _tf_parse_video_files(files, target_size),
+    #                       num_parallel_calls=4)
 
-    if shuffle:
-        dataset = dataset.shuffle(len(files[0]))
-
-    dataset = dataset.map(lambda *files: _tf_parse_video_files(files, target_size),
-                          num_parallel_calls=4)
-
-    # batch_size = 1 if online else config.PARAMS["batch_size"]
-    # dataset = dataset.batch(batch_size)
-    # dataset = dataset.prefetch(5)
+    video, original_size, files = _tf_parse_video_files([video_file], target_size)
+    # We process the video 50 frames at a time
+    dataset = tf.data.Dataset.from_tensor_slices(video)
+    dataset = dataset.map(lambda frame: (frame, original_size, files))
+    dataset = dataset.batch(100)
+    dataset = dataset.prefetch(2)
 
     return dataset
 

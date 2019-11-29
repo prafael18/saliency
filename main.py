@@ -58,9 +58,6 @@ def define_paths(current_path, args):
         "latest": latest_path,
         "weights": weights_path
     }
-
-    print(PATHS)
-
     return PATHS
 
 
@@ -161,7 +158,8 @@ def test_model(dataset, paths, device):
         device (str): Represents either "cpu" or "gpu".
     """
 
-    iterator = data.get_dataset_iterator("test", dataset, paths["data"])
+    video_file = tf.placeholder(tf.string, shape=())
+    iterator = data.get_dataset_iterator("test", dataset, paths["data"], video_file)
 
     next_element, init_op = iterator
 
@@ -186,51 +184,56 @@ def test_model(dataset, paths, device):
                                            input_map={"input": input_images},
                                            return_elements=["output:0"])
 
-    print(original_shape)
-    print(predicted_maps)
-
     print(">> Start testing with %s %s model..." % (dataset.upper(), device))
 
     with tf.Session() as sess:
-        sess.run(init_op)
 
-        while True:
-            try:
-                saliency_video, target_shape, np_file_path = \
-                    sess.run([predicted_maps, original_shape, file_path])
+        video_files = data._get_file_list(paths["data"])
+        for vf in video_files:
+            print(vf)
+            saliency_images_list = []
+            sess.run(init_op, feed_dict={video_file:vf})
+            while True:
+                try:
+                    saliency_images, target_shape, np_file_path = \
+                        sess.run([predicted_maps, original_shape, file_path],
+                            feed_dict={video_file:vf})
+                    saliency_images_list.append(saliency_images)
+                except tf.errors.OutOfRangeError:
+                    break
 
-                commonpath = os.path.commonpath(
-                    [paths["data"], paths["images"]])
-                file_path_str = np_file_path[0].decode("utf-8")
-                relative_file_path = os.path.relpath(
-                    file_path_str, start=commonpath)
-                output_file_path = os.path.join(
-                    paths["images"], relative_file_path)
-                os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+            saliency_video = np.concatenate(saliency_images_list)
+            target_shape = target_shape[0]
+            np_file_path = np_file_path[0][0]
 
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                frame_size = (target_shape[1], target_shape[0])
-                frame_size = (saliency_video.shape[2], saliency_video.shape[1])
-                out = cv2.VideoWriter(
-                    output_file_path, fourcc, 25, frame_size, False)
+            commonpath = os.path.commonpath(
+                [paths["data"], paths["images"]])
+            file_path_str = np_file_path.decode("utf8")
+            relative_file_path = os.path.relpath(
+                file_path_str, start=commonpath)
+            output_file_path = os.path.join(
+                paths["images"], relative_file_path)
+            os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
 
-                saliency_video = np.squeeze(saliency_video)
-                saliency_video *= 255
-                for frame in saliency_video:
-                    saliency_map = data._resize_image(
-                        frame, target_shape, True, is_numpy=True)
-                    saliency_map = data._crop_image(
-                        saliency_map, target_shape, is_numpy=True)
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            frame_size = (target_shape[1], target_shape[0])
+            frame_size = (saliency_video.shape[2], saliency_video.shape[1])
+            out = cv2.VideoWriter(
+                output_file_path, fourcc, 25, frame_size, False)
 
-                    saliency_map = np.round(frame)
-                    saliency_map = saliency_map.astype(np.uint8)
+            saliency_video = np.squeeze(saliency_video)
+            saliency_video *= 255
+            for frame in saliency_video:
+                saliency_map = data._resize_image(
+                    frame, target_shape, True, is_numpy=True)
+                saliency_map = data._crop_image(
+                    saliency_map, target_shape, is_numpy=True)
 
-                    out.write(saliency_map)
-                out.release()
+                saliency_map = np.round(frame)
+                saliency_map = saliency_map.astype(np.uint8)
 
-            except tf.errors.OutOfRangeError:
-                break
-
+                out.write(saliency_map)
+            out.release()
 
 def main():
     """The main function reads the command line arguments, invokes the
