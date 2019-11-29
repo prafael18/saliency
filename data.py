@@ -308,16 +308,13 @@ def _fetch_dataset(files, target_size, shuffle, online=False):
         object: A dataset object that contains the batched and prefetched data
                 instances along with their shapes and file paths.
     """
-
-    print(files)
-
     dataset = tf.data.Dataset.from_tensor_slices(files)
 
     if shuffle:
         dataset = dataset.shuffle(len(files[0]))
 
     dataset = dataset.map(lambda *files: _tf_parse_video_files(files, target_size),
-                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                          num_parallel_calls=4)
 
     # batch_size = 1 if online else config.PARAMS["batch_size"]
     # dataset = dataset.batch(batch_size)
@@ -327,9 +324,9 @@ def _fetch_dataset(files, target_size, shuffle, online=False):
 
 def _tf_parse_video_files(files, target_size):
   [image, original_size, files] = \
-        tf.py_function(_parse_video_files, [files, target_size], [tf.float32, tf.int32, tf.string])
+        tf.py_func(_parse_video_files,
+            [files, target_size], [tf.float32, tf.int64, tf.string])
   image.set_shape([None, target_size[0], target_size[1], 3])
-  print(image, original_size, files)
   return image, original_size, files
 
 def _parse_video_files(files, target_size):
@@ -338,7 +335,7 @@ def _parse_video_files(files, target_size):
     frames_list = []
 
     path_tensor = files[0]
-    path = path_tensor.numpy().decode("utf-8")
+    path = path_tensor.decode("utf-8")
 
     cap = cv2.VideoCapture(path)
     while cap.isOpened():
@@ -346,8 +343,10 @@ def _parse_video_files(files, target_size):
       if ret:
         original_size = frame.shape[:2]
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = _resize_image(image, target_size)
-        image = _pad_image(image, target_size)
+        image = _resize_image(image, target_size, is_numpy=True)
+        image = _np_pad_image(image, target_size)
+        image = image.astype(np.float32)
+
         frames_list.append(image)
       else:
         break
@@ -442,8 +441,6 @@ def _resize_image(image, target_size, overfull=False, is_numpy=False):
         target_size = np.round(target_size).astype(np.int32)
         target_size = (target_size[1], target_size[0])
 
-        image = np.expand_dims(image, 0)
-
         if current_size[0] > target_size[0] or current_size[1] > target_size[1]:
            interpolation = cv2.INTER_AREA
         else:
@@ -471,40 +468,50 @@ def _resize_image(image, target_size, overfull=False, is_numpy=False):
 
     return image
 
-
-def _pad_image(image, target_size, is_numpy=False):
+def _pad_image(image, target_size):
     """A single image, either stimulus or saliency map, will be padded
        symmetrically with the constant value 126 or 0 respectively.
-
     Args:
         image (tensor, float32): 3D tensor with the values of the image data.
         target_size (tuple, int): A tuple that specifies the size to which
                                   the data will be resized.
-
     Returns:
         tensor, float32: 3D tensor that holds the values of the padded image.
     """
-    if is_numpy:
-        lb = np
-        current_size = np.shape(image)
-        pad_constant_value = 126 if current_size[2] == 3 else 0
-    else:
-        lb = tf
-        current_size = tf.shape(image)
-        pad_constant_value = tf.cond(tf.equal(current_size[2], 3),
-                                     lambda: tf.constant(126.0),
-                                     lambda: tf.constant(0.0))
+
+    current_size = tf.shape(image)
+
+    pad_constant_value = tf.cond(tf.equal(current_size[2], 3),
+                                 lambda: tf.constant(126.0),
+                                 lambda: tf.constant(0.0))
 
     pad_vertical = (target_size[0] - current_size[0]) / 2
     pad_horizontal = (target_size[1] - current_size[1]) / 2
 
-    pad_top = lb.floor(pad_vertical)
-    pad_bottom = lb.ceil(pad_vertical)
-    pad_left = lb.floor(pad_horizontal)
-    pad_right = lb.ceil(pad_horizontal)
+    pad_top = tf.floor(pad_vertical)
+    pad_bottom = tf.ceil(pad_vertical)
+    pad_left = tf.floor(pad_horizontal)
+    pad_right = tf.ceil(pad_horizontal)
 
     padding = [[pad_top, pad_bottom], [pad_left, pad_right], [0, 0]]
-    image = lb.pad(image, padding, constant_values=pad_constant_value)
+    image = tf.pad(image, padding, constant_values=pad_constant_value)
+
+    return image
+
+def _np_pad_image(image, target_size):
+    current_size = np.shape(image)
+    pad_constant_value = 126 if current_size[2] == 3 else 0
+    pad_vertical = (target_size[0] - current_size[0]) / 2
+    pad_horizontal = (target_size[1] - current_size[1]) / 2
+
+    pad_top = np.floor(pad_vertical).astype(np.int32)
+    pad_bottom = np.ceil(pad_vertical).astype(np.int32)
+    pad_left = np.floor(pad_horizontal).astype(np.int32)
+    pad_right = np.ceil(pad_horizontal).astype(np.int32)
+
+    padding = [[pad_top, pad_bottom], [pad_left, pad_right], [0, 0]]
+    image = np.pad(
+        image, padding, mode='constant', constant_values=pad_constant_value)
 
     return image
 
@@ -544,7 +551,7 @@ def _crop_image(image, target_size, is_numpy=False):
     border_bottom = crop_top + target_size[0]
     border_right = crop_left + target_size[1]
 
-    image = image[crop_top:border_bottom, crop_left:border_right, :]
+    image = image[crop_top:border_bottom, crop_left:border_right, ...]
 
     return image
 
